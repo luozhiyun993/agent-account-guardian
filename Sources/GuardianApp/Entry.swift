@@ -22,12 +22,14 @@ enum GuardianEntry {
 }
 
 struct GuardianApp: App {
+    @NSApplicationDelegateAdaptor(GuardianAppDelegate.self) private var appDelegate
     @StateObject private var model = GuardianModel()
 
     var body: some Scene {
         Window("Account Guardian", id: "main") {
             GuardianView(model: model)
                 .frame(minWidth: 980, minHeight: 720)
+                .modifier(MainWindowReopenHandler(delegate: appDelegate))
         }
         .defaultSize(width: 1080, height: 800)
         .commands {
