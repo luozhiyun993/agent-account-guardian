@@ -62,6 +62,8 @@ open "dist/Account Guardian.app"
 
 ## 保护对象与启动
 
+进程身份使用 macOS 内核返回的真实可执行路径核实，不依赖可被改写的 `ps` 进程显示名；原生 Claude Code 即使只显示为 `claude` 也可以匹配。无法核实疑似目标时显示读取失败，不把它当作 0 个目标，也不凭名称终止进程。
+
 可分别选择 Claude Desktop 与 Claude Code。桌面进程限定当前用户和已知 `Claude.app/Contents/` 路径；CLI 根据已安装命令解析出的实际可执行文件识别，也支持常见 npm 的 `node/bun + @anthropic-ai/claude-code/cli.js` 入口。未发现的自定义安装路径或额外 Node 参数不承诺覆盖，请先查看进程数量或运行诊断工具。
 
 Claude Desktop 通过系统应用启动接口打开。Claude Code 在 Terminal 中启动，执行前会再次检查保护应用心跳、锁定状态、设置、代理和出口。CLI 初始工作目录由 Terminal 决定，需要项目上下文时可在终端中切换目录后使用应用生成的受管命令：
@@ -73,6 +75,8 @@ Claude Desktop 通过系统应用启动接口打开。Claude Code 在 Terminal �
 锁定且保护开启期间，从其他入口启动的匹配进程也会在巡检后终止。直接启动 Claude 无法享受启动前门禁；原始 CLI 命令依然存在。急停先发送 TERM，等待后对仍匹配原身份的进程发送 KILL，可能中断未完成的工作。
 
 ## 测试
+
+需要核对已识别的 PID 和本机可执行路径时，可运行 `swift run guardian-diagnostics --list-processes`。它不会终止进程，也不会输出会话参数。
 
 ```sh
 swift test --disable-sandbox

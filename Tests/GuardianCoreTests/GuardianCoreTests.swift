@@ -154,6 +154,43 @@ final class InspectionTests: XCTestCase {
         XCTAssertEqual(result?.executable, "/Applications/Example App.app/Contents/MacOS/Example")
     }
 
+    func testNativeCLIWithShortProcessTitleUsesKernelPath() throws {
+        let raw = try XCTUnwrap(ProcessIdentity.parse("94272 501 Sat Nov 7 23:22:56 2026 claude"))
+        let installed = "/Users/example/.local/share/claude/versions/2.1.319"
+        XCTAssertFalse(raw.executableVerified)
+        let resolved = raw.resolvingExecutable(installed)
+        XCTAssertEqual(resolved.pid, raw.pid)
+        XCTAssertEqual(resolved.started, raw.started)
+        XCTAssertTrue(ProcessInspector.isProtected(resolved, settings: GuardianSettings(), uid: 501, cliExecutable: installed))
+        var settings = GuardianSettings()
+        settings.protectCLI = false
+        XCTAssertFalse(ProcessInspector.isProtected(resolved, settings: settings, uid: 501, cliExecutable: installed))
+    }
+
+    func testMisleadingProcessTitleCannotAuthorizeTermination() throws {
+        let installed = "/Users/example/.local/share/claude/versions/2.1.319"
+        let raw = try XCTUnwrap(ProcessIdentity.parse("94272 501 Sat Nov 7 23:22:56 2026 \(installed)"))
+        XCTAssertFalse(ProcessInspector.isProtected(raw, settings: GuardianSettings(), uid: 501, cliExecutable: installed))
+        let resolved = raw.resolvingExecutable("/bin/sleep")
+        XCTAssertFalse(ProcessInspector.isProtected(resolved, settings: GuardianSettings(), uid: 501, cliExecutable: installed))
+    }
+
+    func testUnresolvedCandidateIsUnknownInsteadOfZeroTargets() throws {
+        let raw = try XCTUnwrap(ProcessIdentity.parse("94272 501 Sat Nov 7 23:22:56 2026 claude"))
+        XCTAssertTrue(ProcessInspector.hasUnresolvedCandidate(raw.resolvingExecutable(nil), settings: GuardianSettings(), uid: 501))
+        XCTAssertTrue(ProcessInspector.hasUnresolvedCandidate(raw.resolvingExecutable("claude"), settings: GuardianSettings(), uid: 501))
+        XCTAssertFalse(ProcessInspector.hasUnresolvedCandidate(raw, settings: GuardianSettings(), uid: 502))
+        XCTAssertFalse(ProcessInspector.hasUnresolvedCandidate(raw.resolvingExecutable("/bin/sleep"), settings: GuardianSettings(), uid: 501))
+    }
+
+    func testDesktopMainAndHelperPathsRemainRecognized() throws {
+        for path in ["/Applications/Claude.app/Contents/MacOS/Claude",
+                     "/Applications/Claude.app/Contents/Frameworks/Claude Helper.app/Contents/MacOS/Claude Helper"] {
+            let raw = try XCTUnwrap(ProcessIdentity.parse("94272 501 Sat Nov 7 23:22:56 2026 Claude"))
+            XCTAssertTrue(ProcessInspector.isProtected(raw.resolvingExecutable(path), settings: GuardianSettings(), uid: 501))
+        }
+    }
+
     func testMatcherDoesNotSelectOtherUsersOrSimilarNames() {
         let settings = GuardianSettings()
         func process(_ path: String, uid: UInt32 = 501) -> ProcessIdentity {
@@ -173,6 +210,14 @@ final class InspectionTests: XCTestCase {
         XCTAssertFalse(ProcessInspector.isProtected(identity, settings: GuardianSettings(), uid: 501, cliExecutable: path, arguments: ["node", "-e", path]))
     }
 
+    func testRenamedNodeProcessStillRequiresClaudeEntrypoint() throws {
+        let path = "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+        let raw = try XCTUnwrap(ProcessIdentity.parse("94272 501 Sat Nov 7 23:22:56 2026 claude"))
+        let identity = raw.resolvingExecutable("/opt/homebrew/bin/node")
+        XCTAssertTrue(ProcessInspector.isProtected(identity, settings: GuardianSettings(), uid: 501, cliExecutable: path, arguments: ["node", path]))
+        XCTAssertFalse(ProcessInspector.isProtected(identity, settings: GuardianSettings(), uid: 501, cliExecutable: path, arguments: ["node", "/tmp/other.js"]))
+    }
+
     func testStopperTerminatesOnlyOwnedDisposableChild() async throws {
         let child = Process()
         child.executableURL = URL(fileURLWithPath: "/bin/sleep")
@@ -182,6 +227,13 @@ final class InspectionTests: XCTestCase {
         guard let target = ProcessInspector.snapshot()?.first(where: { $0.pid == child.processIdentifier }) else {
             throw XCTSkip("Process inspection unavailable in this environment")
         }
+        XCTAssertTrue(target.executableVerified)
+        XCTAssertEqual(target.executable, ProcessInspector.executablePath(pid: child.processIdentifier))
+        let unverified = ProcessIdentity(pid: target.pid, uid: target.uid, started: target.started,
+                                        executable: target.executable, executableVerified: false)
+        let unverifiedReport = await ProcessStopper.stop([unverified])
+        XCTAssertEqual(unverifiedReport.stopped, 0)
+        XCTAssertTrue(child.isRunning)
         let stale = ProcessIdentity(pid: target.pid, uid: target.uid, started: "different start", executable: target.executable)
         let rejected = await ProcessStopper.stop([stale])
         XCTAssertEqual(rejected.stopped, 0)

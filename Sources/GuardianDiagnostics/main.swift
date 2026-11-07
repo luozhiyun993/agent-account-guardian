@@ -6,6 +6,11 @@ print("代理与路由：\(connection.health.summary)")
 let settings = GuardianSettings()
 let targets = ProcessInspector.protectedProcesses(settings: settings)
 print("当前用户 Claude 进程：\(targets.map { String($0.count) } ?? "读取失败")")
+if CommandLine.arguments.contains("--list-processes"), let targets {
+    for target in targets {
+        print("已识别 PID \(target.pid)：\(target.executable)")
+    }
+}
 print("Claude Code：\(ProcessInspector.claudeCommand() == nil ? "未找到" : "已找到")")
 if CommandLine.arguments.contains("--network") {
     let result: ExitHealth

@@ -33,19 +33,26 @@ public struct ProcessIdentity: Equatable {
     public let uid: UInt32
     public let started: String
     public let executable: String
+    public let executableVerified: Bool
 
-    public init(pid: Int32, uid: UInt32, started: String, executable: String) {
+    public init(pid: Int32, uid: UInt32, started: String, executable: String, executableVerified: Bool = true) {
         self.pid = pid
         self.uid = uid
         self.started = started
         self.executable = executable
+        self.executableVerified = executableVerified
+    }
+
+    func resolvingExecutable(_ path: String?) -> ProcessIdentity {
+        guard let path, path.hasPrefix("/") else { return self }
+        return ProcessIdentity(pid: pid, uid: uid, started: started, executable: path)
     }
 
     public static func parse(_ line: String) -> ProcessIdentity? {
         let fields = line.split(maxSplits: 7, omittingEmptySubsequences: true, whereSeparator: { $0.isWhitespace })
         guard fields.count == 8, let pid = Int32(fields[0]), let uid = UInt32(fields[1]), pid > 1 else { return nil }
         return ProcessIdentity(pid: pid, uid: uid, started: fields[2...6].joined(separator: " "),
-                               executable: String(fields[7]).trimmingCharacters(in: .whitespaces))
+                               executable: String(fields[7]).trimmingCharacters(in: .whitespaces), executableVerified: false)
     }
 }
 
@@ -53,7 +60,30 @@ public enum ProcessInspector {
     public static func snapshot() -> [ProcessIdentity]? {
         let result = Command.run("/bin/ps", ["-axo", "pid=,uid=,lstart=,comm="])
         guard result.status == 0 else { return nil }
-        return result.output.split(separator: "\n").compactMap { ProcessIdentity.parse(String($0)) }
+        return result.output.split(separator: "\n").compactMap { line in
+            guard let identity = ProcessIdentity.parse(String(line)) else { return nil }
+            guard identity.uid == getuid(), identity.pid != getpid() else { return identity }
+            return identity.resolvingExecutable(executablePath(pid: identity.pid))
+        }
+    }
+
+    public static func executablePath(pid: Int32) -> String? {
+        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        let count = buffer.withUnsafeMutableBytes { bytes in
+            proc_pidpath(pid, bytes.baseAddress, UInt32(bytes.count))
+        }
+        guard count > 0 else { return nil }
+        let path = String(cString: buffer)
+        return path.hasPrefix("/") ? path : nil
+    }
+
+    static func hasUnresolvedCandidate(_ identity: ProcessIdentity, settings: GuardianSettings,
+                                       uid: UInt32 = getuid(), cliExecutable: String? = nil) -> Bool {
+        guard identity.uid == uid, identity.pid != getpid(), !identity.executableVerified else { return false }
+        let name = URL(fileURLWithPath: identity.executable).lastPathComponent.lowercased()
+        if settings.protectCLI, ["claude", "node", "bun"].contains(name) || identity.executable == cliExecutable { return true }
+        if settings.protectDesktop, identity.executable.contains("Claude.app/Contents/") || name.hasPrefix("claude") { return true }
+        return false
     }
 
     public static func arguments(pid: Int32) -> [String] {
@@ -89,7 +119,7 @@ public enum ProcessInspector {
     public static func isProtected(_ identity: ProcessIdentity, settings: GuardianSettings,
                                    uid: UInt32 = getuid(), cliExecutable: String? = nil,
                                    arguments: [String] = []) -> Bool {
-        guard identity.uid == uid, identity.pid != getpid() else { return false }
+        guard identity.uid == uid, identity.pid != getpid(), identity.executableVerified else { return false }
         if settings.protectDesktop {
             let home = FileManager.default.homeDirectoryForCurrentUser.path
             for root in ["/Applications/Claude.app/Contents/", "\(home)/Applications/Claude.app/Contents/"] {
@@ -107,6 +137,7 @@ public enum ProcessInspector {
     public static func protectedProcesses(settings: GuardianSettings) -> [ProcessIdentity]? {
         guard let processes = snapshot() else { return nil }
         let cli = claudeCommand()?.resolvingSymlinksInPath().path
+        if processes.contains(where: { hasUnresolvedCandidate($0, settings: settings, cliExecutable: cli) }) { return nil }
         return processes.filter { identity in
             guard identity.uid == getuid() else { return false }
             let name = URL(fileURLWithPath: identity.executable).lastPathComponent
@@ -127,7 +158,9 @@ public enum ProcessStopper {
     public static func stop(_ targets: [ProcessIdentity]) async -> StopReport {
         var report = StopReport()
         guard let current = ProcessInspector.snapshot() else { report.inspectionFailed = true; return report }
-        let verified = targets.filter { target in current.contains(target) && target.uid == getuid() && target.pid != getpid() }
+        let verified = targets.filter { target in
+            target.executableVerified && current.contains(target) && target.uid == getuid() && target.pid != getpid()
+        }
         for target in verified {
             if kill(target.pid, SIGTERM) != 0 && errno != ESRCH { report.failed += 1 }
         }
@@ -140,7 +173,9 @@ public enum ProcessStopper {
         }
         try? await Task.sleep(nanoseconds: 150_000_000)
         guard let final = ProcessInspector.snapshot() else { report.inspectionFailed = true; return report }
-        report.stopped = verified.filter { !final.contains($0) }.count
+        report.stopped = verified.filter { target in
+            !final.contains { $0.pid == target.pid && $0.uid == target.uid && $0.started == target.started }
+        }.count
         report.failed = max(report.failed, verified.count - report.stopped)
         return report
     }

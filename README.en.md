@@ -67,6 +67,8 @@ A lock remains until the user requests recovery and fresh checks pass. Changing 
 
 ## Protected applications and launching
 
+Process identity is verified using the executable path returned by the macOS kernel, rather than a mutable `ps` display name. Native Claude Code remains recognizable when its display name is only `claude`. Unresolved candidate processes report inspection failure instead of zero targets; names alone never authorize termination.
+
 Claude Desktop and Claude Code can be selected independently. Desktop matching is limited to the current user and known `Claude.app/Contents/` paths. CLI matching uses the resolved executable of an installed Claude command and supports common npm entry points using `node` or `bun` with `@anthropic-ai/claude-code/cli.js`.
 
 Custom installation paths or additional Node launch flags may not be recognized. Check the detected process count or use the diagnostics command first.
@@ -80,6 +82,8 @@ Desktop launches use the system application API. Claude Code launches in Termina
 While protection is enabled and locked, matching processes launched elsewhere are also terminated after detection. Direct launches bypass the pre-launch gate and the original CLI remains available. Emergency termination sends TERM first, then KILL to remaining processes whose identity still matches. Work in progress may be interrupted.
 
 ## Testing
+
+Use `swift run guardian-diagnostics --list-processes` to inspect matched PIDs and local executable paths. It does not terminate processes or print session arguments.
 
 ```sh
 swift test --disable-sandbox
