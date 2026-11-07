@@ -88,7 +88,6 @@ struct GuardianView: View {
             }.background(Color(nsColor: .windowBackgroundColor))
         }
         .tint(accent)
-        .onAppear { NSApplication.shared.applicationIconImage = mascot }
         .alert("启用保护与自动急停？", isPresented: $confirmEnable) {
             Button("取消", role: .cancel) {}
             Button("启用保护") { model.enableProtection() }

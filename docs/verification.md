@@ -1,5 +1,12 @@
 # 验证记录
 
+## 0.2.2 图标来源统一（2026-11-07）
+
+- 移除主界面出现时对 `NSApplication.applicationIconImage` 的动态覆盖；Dock 图标统一由应用包的 `CFBundleIconFile` 提供，侧栏插画仍从同一渲染器生成。
+- 构建改用全新的临时应用包，签名并验证成功后替换旧包。确认最终 Resources 仅包含 `GuardianSafe.icns` 和 `GuardianMascot.png`，不再夹带旧 `Guardian.icns`。
+- 从 macOS `NSWorkspace.icon(forFile:)` 读取打包应用的默认图标并目视确认是小锁。解包 ICNS 检查 10 个尺寸：8 个像素完全相同，16/32 像素的非 Retina 编码有轻微差异，平均通道差异均小于 1/255。
+- release 构建、严格签名校验和脚本语法检查通过。刷新此应用的 Launch Services 注册；未重启当前守护或 Dock，未实时观察用户当前旧进程的退出动画。
+
 ## 0.2.1 Dock 窗口恢复（2026-11-07）
 
 - 增加应用重新打开事件处理，通过 SwiftUI 的主窗口标识恢复窗口；菜单栏持续监控逻辑不变。
