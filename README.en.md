@@ -4,12 +4,12 @@
 
 <img src="assets/icon.png" width="128" alt="Account Guardian friendly padlock icon">
 
-A native macOS desktop app that checks the proxy environment used by Claude, with Clash Party integration. It provides launch checks, continuous monitoring, process termination on confirmed faults, persistent lockout, and manual recovery.
+A native macOS desktop app that checks the proxy environment used by Claude without depending on a particular proxy client. It provides launch checks, continuous monitoring, process termination on confirmed faults, persistent lockout, and manual recovery.
 
 ## Features
 
 - Native SwiftUI window and menu bar, with a friendly illustrated padlock icon.
-- Clash Party core, TUN interface, and probe-route checks.
+- Automatic detection of static system HTTPS proxies and actual tunnel routes.
 - Exit-country validation and optional manually pinned exit IP.
 - Protected launching and monitoring for Claude Desktop and Claude Code.
 - Confirmed faults terminate selected processes and lock protection until manual recovery.
@@ -20,7 +20,7 @@ The current interface is in Simplified Chinese. This English README documents th
 
 ## Build and run
 
-Requires macOS 13 or later, Swift 5.9 or later, and Clash Party with TUN enabled. There are no third-party package dependencies. From the project root:
+Requires macOS 13 or later, Swift 5.9 or later, and a network tool providing a system tunnel or a static macOS HTTPS proxy. There are no third-party package dependencies. From the project root:
 
 ```sh
 bash scripts/build-app.sh
@@ -43,8 +43,9 @@ Closing the window leaves the menu bar app running. Quitting stops monitoring an
 | IP changes within the target country, without IP pinning | Warn and keep running | Allowed |
 | Exit country does not match | Terminate and lock | Blocked |
 | IP pinning is enabled and the address does not match | Terminate and lock | Blocked |
-| Party core has exited, TUN is disabled, or the configured interface disappears | Terminate and lock | Blocked |
-| A probe route is confirmed to have left the configured TUN | Terminate and lock | Blocked |
+| System HTTPS proxy port explicitly refuses connections | Terminate and lock | Blocked |
+| No system HTTPS proxy and complete probe routes include a non-tunnel path | Terminate and lock | Blocked |
+| System proxy endpoint or proxy/tunnel mode changes during protection | Terminate and lock to avoid retaining the old proxy | Blocked |
 | Network unavailable, exit lookup timeout, or unusable response | Keep running, show unknown, retry | Blocked |
 | Process, route, or configuration inspection is unavailable | Keep running, show unknown, retry | Blocked |
 
@@ -54,13 +55,15 @@ Local checks run approximately every 2 seconds. Exit checks repeat approximately
 
 A lock remains until the user requests recovery and fresh checks pass. Changing settings, pausing protection, or reopening the app does not clear it.
 
-## Clash Party integration
+## Client-independent network detection
 
-- Recognizes the bundled `sidecar/mihomo`, `mihomo-alpha`, or `mihomo-smart` core inside `/Applications/Clash Party.app` or the user's `Applications` directory.
-- Extracts the TUN enabled flag and device name from `~/Library/Application Support/mihomo-party/mihomo.yaml`. Subscription details and controller secrets are not displayed or persisted.
-- Confirms that the configured interface exists and that system routes to `1.1.1.1` and `8.8.8.8` use it.
-- Requires TUN mode. An external controller is not required, and the app does not modify Party settings.
-- Requests `https://www.cloudflare.com/cdn-cgi/trace` through the normal system network path and reads `ip` and `loc`. The request does not explicitly force a separate proxy path.
+- Does not read client processes, installation paths, subscriptions, or configuration files. No external controller is required.
+- Prefers a static macOS HTTPS proxy, checks its TCP endpoint, and explicitly routes the exit probe through that same proxy. Proxy rejection does not fall back to a direct request.
+- With no system proxy, verifies that routes to both `1.1.1.1` and `8.8.8.8` use existing `utun`, `tun`, `ppp`, `ipsec`, or `wg` interfaces. An unrelated virtual interface alone does not pass.
+- PAC/autodiscovery, SOCKS-only, HTTP-only, conflicting per-interface settings, and ambiguous bypass rules remain unknown. IP/subnet exceptions and wildcard exceptions outside `.local` are conservatively blocked. Compatibility depends on network mode, not client branding.
+- Missing routes, interface transitions, and proxy timeouts wait for retry. Confirmed non-tunnel routes or connection refusal trigger a local fault.
+- Reads `ip` and `loc` from `https://www.cloudflare.com/cdn-cgi/trace` over the selected transport. Path changes invalidate previous exit observations.
+- In system proxy mode, launch Claude Code through this app: the launcher sets proxy environment variables and clears stale proxy/bypass variables. Externally launched CLIs may ignore system settings. Desktop applications must themselves follow the system proxy; custom application proxies and routing rules need separate validation.
 
 ## Protected applications and launching
 
@@ -120,4 +123,4 @@ Cloudflare's country classification may differ from the service provider's. A lo
 
 ## Acknowledgments
 
-The launch-check and emergency-stop ideas were inspired by [YOURSJEYO/claude-switcher](https://github.com/YOURSJEYO/claude-switcher). This is an independent Swift / SwiftUI implementation adapted for Clash Party, not a complete port. It does not guarantee that an account will remain unrestricted.
+The launch-check and emergency-stop ideas were inspired by [YOURSJEYO/claude-switcher](https://github.com/YOURSJEYO/claude-switcher). This is an independent Swift / SwiftUI implementation, not a complete port. It does not guarantee that an account will remain unrestricted.

@@ -66,7 +66,7 @@ public enum LocalHealth: Equatable {
 
     public var summary: String {
         switch self {
-        case .healthy(let interface): return "Clash Party 内核在线 · 路由经 \(interface)"
+        case .healthy(let interface): return "网络路径已确认 · \(interface)"
         case .unsafe(let reason), .unknown(let reason): return reason
         }
     }

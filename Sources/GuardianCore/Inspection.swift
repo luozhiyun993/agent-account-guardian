@@ -146,74 +146,20 @@ public enum ProcessStopper {
     }
 }
 
-public enum LocalInspector {
-    public static let configURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/mihomo-party/mihomo.yaml")
-
-    public static func tunDevice(from yaml: String) -> (enabled: Bool?, device: String?) {
-        var inside = false
-        var enabled: Bool?
-        var device: String?
-        for line in yaml.components(separatedBy: .newlines) {
-            if line == "tun:" { inside = true; continue }
-            if inside && !line.isEmpty && !line.hasPrefix(" ") && !line.hasPrefix("#") { break }
-            guard inside else { continue }
-            let fields = line.trimmingCharacters(in: .whitespaces).split(separator: ":", maxSplits: 1).map(String.init)
-            guard fields.count == 2 else { continue }
-            let value = fields[1].components(separatedBy: " #")[0]
-                .trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
-            if fields[0] == "enable" { enabled = value == "true" ? true : value == "false" ? false : nil }
-            if fields[0] == "device", value.hasPrefix("utun"), value.dropFirst(4).allSatisfy({ $0.isNumber }), value.count > 4 {
-                device = value
-            }
-        }
-        return (enabled, device)
-    }
-
-    public static func inspect() -> LocalHealth {
-        guard let processes = ProcessInspector.snapshot() else { return .unknown("无法读取进程状态，检查系统权限。") }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let roots = ["/Applications/Clash Party.app/Contents/Resources/sidecar/",
-                     "\(home)/Applications/Clash Party.app/Contents/Resources/sidecar/"]
-        let names = ["mihomo", "mihomo-alpha", "mihomo-smart"]
-        let kernel = processes.contains { process in
-            roots.contains { root in names.contains { process.executable == root + $0 } }
-        }
-        guard kernel else { return .unsafe("Clash Party 代理内核未运行。") }
-        guard let yaml = try? String(contentsOf: configURL, encoding: .utf8) else {
-            return .unknown("无法读取 Clash Party 的 TUN 配置。")
-        }
-        let config = tunDevice(from: yaml)
-        if config.enabled == false { return .unsafe("Clash Party 的 TUN 已关闭。") }
-        guard config.enabled == true, let device = config.device else {
-            return .unknown("无法确认 Clash Party 的 TUN 网卡；请在 Clash Party 开启 TUN。")
-        }
-        let interfaces = Command.run("/sbin/ifconfig", ["-l"])
-        guard interfaces.status == 0 else { return .unknown("无法读取系统网卡。") }
-        guard interfaces.output.split(whereSeparator: { $0.isWhitespace }).contains(Substring(device)) else {
-            return .unsafe("Clash Party 的 TUN 网卡 \(device) 已消失。")
-        }
-        for destination in ["1.1.1.1", "8.8.8.8"] {
-            let route = Command.run("/sbin/route", ["-n", "get", destination])
-            guard route.status == 0 else { return .unknown("暂时无法确认路由；保留运行并等待重试。") }
-            let interface = route.output.components(separatedBy: .newlines)
-                .first { $0.trimmingCharacters(in: .whitespaces).hasPrefix("interface:") }?
-                .components(separatedBy: ":").last?.trimmingCharacters(in: .whitespaces)
-            guard let interface else { return .unknown("未取得有效的出口路由。") }
-            if interface != device { return .unsafe("出口路由已离开 Clash Party 的 TUN 网卡。") }
-        }
-        return .healthy(interface: device)
-    }
-}
-
 public enum ExitInspector {
-    public static func inspect() async -> ExitHealth {
+    public static func configuration(transport: NetworkTransport) -> URLSessionConfiguration {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 8
         config.timeoutIntervalForResource = 10
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.httpCookieStorage = nil
         config.urlCache = nil
+        config.connectionProxyDictionary = transport.proxyDictionary
+        return config
+    }
+
+    public static func inspect(transport: NetworkTransport) async -> ExitHealth {
+        let config = configuration(transport: transport)
         let session = URLSession(configuration: config)
         defer { session.invalidateAndCancel() }
         var request = URLRequest(url: URL(string: "https://www.cloudflare.com/cdn-cgi/trace")!)

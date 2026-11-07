@@ -142,8 +142,8 @@ struct GuardianView: View {
             }
             Spacer()
             VStack(alignment: .leading, spacing: 8) {
-                Label("Clash Party", systemImage: "network").font(.system(size: 12, weight: .medium))
-                Text("macOS · TUN 代理适配").font(.system(size: 11)).foregroundStyle(.secondary)
+                Label("系统网络检测", systemImage: "network").font(.system(size: 12, weight: .medium))
+                Text("macOS · 隧道 / HTTPS 代理").font(.system(size: 11)).foregroundStyle(.secondary)
                 Divider().padding(.vertical, 4)
                 Text("关闭窗口后仍在菜单栏运行。\n退出应用会停止保护。")
                     .font(.system(size: 11)).foregroundStyle(.secondary).lineSpacing(4)
@@ -191,7 +191,7 @@ struct GuardianView: View {
             HStack(alignment: .top, spacing: 16) {
                 card("代理与隧道", icon: "network") {
                     Text(model.local.summary).font(.system(size: 14, weight: .medium)).fixedSize(horizontal: false, vertical: true)
-                    Text("核对 Party 内核、配置网卡与两条探测路由。")
+                    Text(model.networkGuidance)
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 card("当前出口", icon: "globe.asia.australia") {
@@ -237,6 +237,12 @@ struct GuardianView: View {
                     }.frame(width: 110)
                 }
                 Text("与参考项目一致：使用 Cloudflare trace 返回的地区。地区定位可能有误差，不代表 Claude 的地区判断。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            card("网络路径自动识别", icon: "network") {
+                Text("支持将系统流量接入隧道的 VPN / TUN，以及 macOS 静态 HTTPS 代理。无需选择客户端或填写其配置路径。")
+                    .font(.system(size: 13))
+                Text("PAC、仅 SOCKS 和无法确认的配置会阻止新的受管启动。系统代理模式下，Claude Code 需从本应用启动以继承检测到的代理。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             card("指定出口 IP", icon: "pin") {

@@ -85,15 +85,24 @@ enum CLIEntry {
                     fail("守护应用未启用、已锁定或不在线。请在主窗口完成检查。")
                     return
                 }
-                let local = LocalInspector.inspect()
-                let exit = await ExitInspector.inspect()
-                let decision = GuardianPolicy.evaluate(settings: original.settings, local: local, exit: exit)
+                let connection = LocalInspector.inspectConnection()
+                guard let transport = connection.transport else {
+                    fail("没有可确认的系统代理或隧道路径。")
+                    return
+                }
+                let exit = await ExitInspector.inspect(transport: transport)
+                let confirmed = LocalInspector.inspectConnection()
+                let decision = GuardianPolicy.evaluate(settings: original.settings, local: confirmed.health, exit: exit)
                 let current = try store.load()
-                guard current.settings == original.settings, current.permitsLaunch(decision),
+                guard confirmed.transport == transport, current.settings == original.settings, current.permitsLaunch(decision),
                       let command = ProcessInspector.claudeCommand() else {
                     fail("代理或出口检查未通过，或保护状态已变化。Claude Code 未启动。")
                     return
                 }
+                let originalEnvironment = ProcessInfo.processInfo.environment
+                let environment = transport.cliEnvironment(from: originalEnvironment)
+                for key in originalEnvironment.keys where environment[key] == nil { unsetenv(key) }
+                for (key, value) in environment where originalEnvironment[key] != value { setenv(key, value, 1) }
                 print("保护检查通过，正在启动 Claude Code。")
                 let strings = [command.path] + Array(CommandLine.arguments.dropFirst(2))
                 let pointers = strings.map { strdup($0) } + [nil]

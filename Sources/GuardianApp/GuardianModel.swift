@@ -11,7 +11,8 @@ struct GuardianEvent: Identifiable, Codable {
 @MainActor
 final class GuardianModel: ObservableObject {
     @Published var state: ProtectionState
-    @Published var local: LocalHealth = .unknown("正在读取 Clash Party 状态…")
+    @Published var local: LocalHealth = .unknown("正在读取系统代理与路由状态…")
+    @Published private(set) var transport: NetworkTransport?
     @Published var exit: ExitHealth = .unknown("正在检测出口…")
     @Published var events: [GuardianEvent] = []
     @Published var notice = ""
@@ -31,6 +32,7 @@ final class GuardianModel: ObservableObject {
     private var localRevision = 0
     private var localChecked = Date.distantPast
     private var wakeObserver: NSObjectProtocol?
+    private var lastConfirmedTransport: NetworkTransport?
 
     init() {
         do {
@@ -106,6 +108,13 @@ final class GuardianModel: ObservableObject {
         return nil
     }
 
+    var networkGuidance: String {
+        if case .systemHTTPS = transport {
+            return "系统代理模式：Claude Code 请通过本应用启动，其他入口可能不跟随系统代理。"
+        }
+        return "自动识别系统 HTTPS 代理或实际隧道路由，不依赖代理软件名称。"
+    }
+
     func record(_ text: String) {
         if events.first?.text == text { return }
         events.insert(GuardianEvent(text: text), at: 0)
@@ -132,10 +141,30 @@ final class GuardianModel: ObservableObject {
         defer { checkingLocal = false }
         let settings = state.settings
         let capturedRevision = revision
-        let result = await Task.detached { (LocalInspector.inspect(), ProcessInspector.protectedProcesses(settings: settings)) }.value
+        let result = await Task.detached { (LocalInspector.inspectConnection(), ProcessInspector.protectedProcesses(settings: settings)) }.value
         guard revision == capturedRevision else { return }
-        if result.0 != local { record("代理检查：\(result.0.summary)") }
-        local = result.0
+        let connection = result.0
+        if connection.transport != transport {
+            revision += 1
+            exit = .unknown("网络路径已变化，等待新的出口检测。")
+            lastNetworkUpdate = .distantPast
+            transport = connection.transport
+        }
+        if let newTransport = connection.transport {
+            if let previous = lastConfirmedTransport, newTransport.requiresProcessRestart(after: previous),
+               state.enabled, state.lockedReason == nil {
+                state.observe(.trip("系统代理路径已切换，已有进程可能仍使用旧代理，请检查并手动恢复。"))
+                record("已锁定：系统代理路径变化，等待手动恢复。")
+                notice = state.lockedReason ?? ""
+            }
+            lastConfirmedTransport = newTransport
+        }
+        var health = connection.health
+        if result.1 == nil, case .healthy = health {
+            health = .unknown("无法读取受保护进程，启动门禁保持关闭。")
+        }
+        if health != local { record("代理检查：\(health.summary)") }
+        local = health
         localChecked = Date()
         localRevision += 1
         targetCount = result.1?.count
@@ -148,9 +177,15 @@ final class GuardianModel: ObservableObject {
         guard !checking else { return }
         checking = true
         defer { checking = false }
+        guard let requestTransport = transport else {
+            exit = .unknown("尚未确认系统代理或隧道路径，暂不发送出口探针。")
+            lastNetworkUpdate = Date()
+            return
+        }
         let capturedRevision = revision
-        let result = await ExitInspector.inspect()
-        guard revision == capturedRevision else { return }
+        let result = await ExitInspector.inspect(transport: requestTransport)
+        await refreshLocal()
+        guard revision == capturedRevision, transport == requestTransport else { return }
         exit = result
         lastChecked = Date()
         lastNetworkUpdate = Date()
@@ -333,7 +368,7 @@ final class GuardianModel: ObservableObject {
             result = GuardianPolicy.evaluate(settings: settings, local: healthy,
                 exit: .known(ExitObservation(ip: "1.1.1.1", country: settings.country)))
         default:
-            result = GuardianPolicy.evaluate(settings: settings, local: .unsafe("模拟代理内核退出"), exit: healthyExit)
+            result = GuardianPolicy.evaluate(settings: settings, local: .unsafe("模拟代理路径失效"), exit: healthyExit)
         }
         sandbox.observe(result)
         var lines = ["模拟：\(scenario)", "启动门禁：\(result.mayLaunch ? "允许" : "阻止")",

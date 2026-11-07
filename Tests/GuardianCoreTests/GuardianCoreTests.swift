@@ -142,19 +142,16 @@ final class GuardianPolicyTests: XCTestCase {
 }
 
 final class InspectionTests: XCTestCase {
-    func testConfigParserUsesTunScopeNotDNSOrOtherEnableFields() {
-        let yaml = "mixed-port: 7890\ntun:\n  enable: true\n  device: utun1500\ndns:\n  enable: false\n  device: utun9\n"
-        let result = LocalInspector.tunDevice(from: yaml)
-        XCTAssertEqual(result.enabled, true)
-        XCTAssertEqual(result.device, "utun1500")
-        XCTAssertNil(LocalInspector.tunDevice(from: "tun:\n  enable: true\n  device: ';bad'\n").device)
+    func testRouteParserReadsActualInterface() {
+        XCTAssertEqual(LocalInspector.routeInterface(from: "gateway: 10.0.0.1\n  interface: utun7\n"), "utun7")
+        XCTAssertNil(LocalInspector.routeInterface(from: "route: not in table"))
     }
 
     func testProcessParserPreservesSpacesAndStartIdentity() {
-        let result = ProcessIdentity.parse("  421 501 Sat Nov  7 21:00:00 2026     /Applications/Clash Party.app/Contents/Resources/sidecar/mihomo")
+        let result = ProcessIdentity.parse("  421 501 Sat Nov  7 21:00:00 2026     /Applications/Example App.app/Contents/MacOS/Example")
         XCTAssertEqual(result?.pid, 421)
         XCTAssertEqual(result?.started, "Sat Nov 7 21:00:00 2026")
-        XCTAssertEqual(result?.executable, "/Applications/Clash Party.app/Contents/Resources/sidecar/mihomo")
+        XCTAssertEqual(result?.executable, "/Applications/Example App.app/Contents/MacOS/Example")
     }
 
     func testMatcherDoesNotSelectOtherUsersOrSimilarNames() {

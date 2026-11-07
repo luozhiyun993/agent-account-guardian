@@ -4,12 +4,12 @@
 
 <img src="assets/icon.png" width="128" alt="Account Guardian 小锁卫士图标">
 
-一个面向 macOS、适配 Clash Party 的 Claude 代理守护桌面应用。包含启动前门禁、持续检测、进程急停、异常锁定和手动恢复。
+一个面向 macOS、不绑定代理客户端的 Claude 代理守护桌面应用。包含启动前门禁、持续检测、进程急停、异常锁定和手动恢复。
 
 ## 功能
 
 - 原生 SwiftUI 主窗口与菜单栏，搭配简笔画小锁图标。
-- 检查 Clash Party 内核、TUN 和探测路由。
+- 自动识别系统静态 HTTPS 代理或实际隧道路由。
 - 出口地区匹配，以及可选的手动指定出口 IP。
 - Claude Desktop / Code 启动门禁、持续监控、异常急停与持久锁定。
 - 网络超时保留正在运行的 Claude；手动重新检查通过后才能解锁。
@@ -17,7 +17,7 @@
 
 ## 运行
 
-需要 macOS 13 或更高版本、Swift 5.9 或更高版本的开发工具，以及已安装并开启 TUN 的 Clash Party。无第三方包依赖。在项目根目录运行：
+需要 macOS 13 或更高版本、Swift 5.9 或更高版本的开发工具，以及提供系统隧道或 macOS 静态 HTTPS 代理的网络工具。无第三方包依赖。在项目根目录运行：
 
 ```sh
 bash scripts/build-app.sh
@@ -40,8 +40,9 @@ open "dist/Account Guardian.app"
 | 同地区内 IP 变化，未启用指定 IP | 提醒并保持运行 | 允许 |
 | 出口地区不符合设置 | 急停并锁定 | 阻止 |
 | 已启用指定 IP，出口不一致 | 急停并锁定 | 阻止 |
-| 确认 Party 内核退出、TUN 关闭或目标网卡消失 | 急停并锁定 | 阻止 |
-| 探测路由明确离开目标 TUN | 急停并锁定 | 阻止 |
+| 系统 HTTPS 代理端口明确拒绝连接 | 急停并锁定 | 阻止 |
+| 无系统 HTTPS 代理，且完整探测路由包含非隧道路径 | 急停并锁定 | 阻止 |
+| 保护期间切换系统代理端点或代理/隧道模式 | 急停并锁定，避免进程继续使用旧代理 | 阻止 |
 | 网络不通、出口查询超时或结果不可信 | 保持运行，显示未知并重试 | 阻止 |
 | 无法读取进程、路由或配置 | 保持运行，显示未知并重试 | 阻止 |
 
@@ -49,13 +50,15 @@ open "dist/Account Guardian.app"
 
 本机检查约每 2 秒一次，出口查询在上次结束后约 10 秒再次执行；网络请求有最多约 10 秒的超时，系统调度和命令执行还会增加延迟。网络探针独立于本机巡检，网络超时不会阻塞本机异常检查。锁定保持到用户重新检查并解锁；更改设置、暂停保护或重开应用不会清除锁定。
 
-## Clash Party 适配
+## 通用网络检测
 
-- 识别 `/Applications/Clash Party.app` 或用户 `Applications` 中随应用分发的 `sidecar/mihomo`、`mihomo-alpha`、`mihomo-smart` 内核。
-- 从 `~/Library/Application Support/mihomo-party/mihomo.yaml` 提取 TUN 开关及设备名，不展示或存储配置中的订阅及控制器密钥。
-- 核对指定设备确实存在，并核对 `1.1.1.1` 和 `8.8.8.8` 的系统路由使用该设备。
-- 当前适配要求 TUN 模式，不要求打开 external-controller，也不会修改 Party 的代理配置。
-- 从正常系统网络路径访问 `https://www.cloudflare.com/cdn-cgi/trace`，取 `ip` 和 `loc`。不显式指定代理，避免测试路径与桌面程序默认路径脱节。
+- 不读取客户端进程、安装路径、订阅或配置文件，也不需要 external-controller。
+- 优先读取 macOS 静态 HTTPS 代理，验证端口可连接，并让出口探针显式使用同一个代理；代理拒绝请求不会回退直连。
+- 没有系统代理时，核对 `1.1.1.1` 和 `8.8.8.8` 的实际路由都经过现存的 `utun`、`tun`、`ppp`、`ipsec` 或 `wg` 隧道。仅存在虚拟网卡不代表检测通过。
+- PAC / 自动代理、仅 SOCKS、仅 HTTP、冲突的按网卡设置，以及无法确认的绕过规则显示「未知」。IP / 网段例外与非 `.local` 通配例外采用保守阻止策略。不能仅凭客户端品牌推断支持；请使用可确认的系统 HTTPS 代理或隧道配置。
+- 路由暂缺、网卡切换或代理连接超时只等待重试，不因检测不到信息急停；明确非隧道路由或端口拒绝连接才触发本机异常。
+- 通过所选路径访问 `https://www.cloudflare.com/cdn-cgi/trace`，读取 `ip` 和 `loc`。路径变化会废弃旧出口结果，重新检测。
+- 系统代理模式下，请通过本应用启动 Claude Code：启动器会设置代理环境变量并清除旧的代理和绕过变量。外部终端启动的 CLI 可能忽略系统代理，无法保证与探针路径一致。桌面应用仍依赖自身遵循系统代理；自定义应用代理或分流规则需自行验证。
 
 ## 保护对象与启动
 
@@ -113,4 +116,4 @@ Cloudflare 的出口地区可能与服务商判断不同。一次探针只证明
 
 ## 致谢
 
-设计参考 [YOURSJEYO/claude-switcher](https://github.com/YOURSJEYO/claude-switcher) 的启动检查与进程急停思路，本项目独立使用 Swift / SwiftUI 实现，并针对 Clash Party 适配。不是原项目的完整移植，也不构成账号不受限制的保证。
+设计参考 [YOURSJEYO/claude-switcher](https://github.com/YOURSJEYO/claude-switcher) 的启动检查与进程急停思路，本项目独立使用 Swift / SwiftUI 实现。不是原项目的完整移植，也不构成账号不受限制的保证。

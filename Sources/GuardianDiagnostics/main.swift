@@ -1,14 +1,19 @@
 import Foundation
 import GuardianCore
 
-let local = LocalInspector.inspect()
-print("代理与路由：\(local.summary)")
+let connection = LocalInspector.inspectConnection()
+print("代理与路由：\(connection.health.summary)")
 let settings = GuardianSettings()
 let targets = ProcessInspector.protectedProcesses(settings: settings)
 print("当前用户 Claude 进程：\(targets.map { String($0.count) } ?? "读取失败")")
 print("Claude Code：\(ProcessInspector.claudeCommand() == nil ? "未找到" : "已找到")")
 if CommandLine.arguments.contains("--network") {
-    let result = await ExitInspector.inspect()
+    let result: ExitHealth
+    if let transport = connection.transport {
+        result = await ExitInspector.inspect(transport: transport)
+    } else {
+        result = .unknown("没有可确认的代理或隧道路径，未发送出口请求。")
+    }
     switch result {
     case .known(let observation):
         print("出口探针：有效；地区 \(observation.country)；地址默认隐藏")
