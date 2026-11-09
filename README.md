@@ -10,6 +10,7 @@
 
 - 原生 SwiftUI 主窗口与菜单栏，搭配简笔画小锁图标。
 - 自动识别系统静态 HTTPS 代理或实际隧道路由。
+- 网络状态与进程检查状态独立展示、分别记录；进程读取失败不会覆盖网络结果，仍会阻止受管启动和解锁。
 - 出口地区匹配，以及可选的手动指定出口 IP。
 - Claude Desktop / Code 启动门禁、持续监控、异常急停与持久锁定。
 - 网络超时保留正在运行的 Claude；手动重新检查通过后才能解锁。
@@ -24,7 +25,7 @@ bash scripts/build-app.sh
 open "dist/Account Guardian.app"
 ```
 
-也可以运行 `swift run AccountGuardian` 开发调试。发布包使用本机 ad-hoc 签名，未公证；当前构建产物面向本机架构。
+也可以运行 `swift run AccountGuardian` 开发调试。发布包使用本机 ad-hoc 签名，未公证；打包脚本同时构建 arm64 和 x86_64，生成 Apple Silicon / Intel 双架构应用。
 
 首次打开处于**观察模式**：会检查环境，但不会终止任何 Claude 进程。先进入「出口与规则」，确认目标国家代码及可选的固定 IP，再在「保护概览」启用保护。
 
@@ -62,9 +63,13 @@ open "dist/Account Guardian.app"
 
 ## 保护对象与启动
 
-进程身份使用 macOS 内核返回的真实可执行路径核实，不依赖可被改写的 `ps` 进程显示名；原生 Claude Code 即使只显示为 `claude` 也可以匹配。无法核实疑似目标时显示读取失败，不把它当作 0 个目标，也不凭名称终止进程。
+进程身份优先使用 `proc_pidpath` 返回的真实路径；该接口失败时，使用 `KERN_PROCARGS2` 中内核保存的可执行路径作为备用，不使用可改写的 `argv[0]` 或 `ps` 显示名授权终止。仅匹配当前用户动态发现的 Claude Desktop 应用与 Claude Code 安装入口。其他软件的 Node / Bun 不会仅因名称进入候选；npm 方式必须匹配 Claude Code 的实际脚本入口。已退出或僵尸候选不阻断检查。
 
-可分别选择 Claude Desktop 与 Claude Code。桌面进程限定当前用户和已知 `Claude.app/Contents/` 路径；CLI 根据已安装命令解析出的实际可执行文件识别，也支持常见 npm 的 `node/bun + @anthropic-ai/claude-code/cli.js` 入口。未发现的自定义安装路径或额外 Node 参数不承诺覆盖，请先查看进程数量或运行诊断工具。
+无法核实的真实 Claude 候选会单独提示并阻止新的受管启动/解锁，但不会丢弃已核实的目标。网络异常急停时仍终止已核实的 Claude 进程；无法核实的目标不会凭名称误杀。
+
+可分别选择 Claude Desktop 与 Claude Code。Desktop 通过产品 Bundle ID、系统应用注册和运行进程的外层应用元数据发现，不要求固定目录或文件名；监测与启动复用发现结果。CLI 搜索当前 PATH、常见原生/Homebrew/npm 安装、nvm/asdf/mise/fnm/Volta 入口，并保留原生版本目录中的多个版本。npm 模式根据 `package.json` 的产品名称和 `bin.claude` 声明定位脚本，不依赖 `cli.js` 文件名；支持常见 Node 前置参数及进程工作目录下的相对脚本路径。
+
+特殊 shell 别名、无法解析的 shim 或未覆盖的安装器，可以在「出口与规则 → 安装位置」填写可信的 `.app` / CLI 命令绝对路径（或 `~/`），留空使用自动发现。产品 Bundle ID、npm 包名称和有限的安装器布局仍是匹配约定，不是任意进程的签名认证；纯 shell shim 不作为终止目标。macOS 权限限制、未知 Node 参数等仍可能造成漏检，不能保证所有自定义运行方式；可运行 `guardian-diagnostics --list-installations --list-processes` 核对。
 
 Claude Desktop 通过系统应用启动接口打开。Claude Code 在 Terminal 中启动，执行前会再次检查保护应用心跳、锁定状态、设置、代理和出口。CLI 初始工作目录由 Terminal 决定，需要项目上下文时可在终端中切换目录后使用应用生成的受管命令：
 
@@ -80,7 +85,8 @@ Claude Desktop 通过系统应用启动接口打开。Claude Code 在 Terminal �
 
 ```sh
 swift test --disable-sandbox
-swift run guardian-diagnostics
+bash scripts/verify-discovery.sh
+swift run guardian-diagnostics --list-installations
 swift run guardian-diagnostics --network
 ```
 

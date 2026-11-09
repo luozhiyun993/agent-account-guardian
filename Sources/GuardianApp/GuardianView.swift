@@ -189,7 +189,7 @@ struct GuardianView: View {
 
             HStack(alignment: .top, spacing: 16) {
                 card("代理与隧道", icon: "network") {
-                    Text(model.local.summary).font(.system(size: 14, weight: .medium)).fixedSize(horizontal: false, vertical: true)
+                    Text(model.networkStatus.summary).font(.system(size: 14, weight: .medium)).fixedSize(horizontal: false, vertical: true)
                     Text(model.networkGuidance)
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -207,6 +207,13 @@ struct GuardianView: View {
                 }
             }
 
+            card("进程检查", icon: "app.badge.checkmark") {
+                Text(model.processStatus.summary)
+                    .font(.system(size: 14, weight: .medium)).fixedSize(horizontal: false, vertical: true)
+                Text("仅监测当前用户的 Claude Desktop / Code。其他软件的 Node 进程不会阻断检查；网络异常时终止已核实的 Claude 目标，少数目标无法核实时单独提示。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             card("受保护的启动", icon: "play.shield") {
                 HStack(spacing: 12) {
                     Button { model.launchDesktop() } label: { Label("启动 Claude Desktop", systemImage: "macwindow") }
@@ -214,7 +221,7 @@ struct GuardianView: View {
                     Button { model.launchCLI() } label: { Label("启动 Claude Code", systemImage: "terminal") }
                         .disabled(!model.state.enabled || model.state.lockedReason != nil || !model.state.settings.protectCLI || model.checking)
                 }
-                Text("已识别 \(model.targetCount.map(String.init) ?? "未知数量的") 个受保护进程。每次启动前重新检查，终端执行前再次校验。")
+                Text("每次启动前重新检查网络、出口与进程状态，终端执行前再次校验。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Label("进程级保护存在检测窗口；出口探针不代表所有域名或 IPv6 路径都已验证。", systemImage: "info.circle")
@@ -263,6 +270,16 @@ struct GuardianView: View {
                 Toggle("Claude Desktop", isOn: $draft.protectDesktop)
                 Toggle("Claude Code", isOn: $draft.protectCLI)
                 Text("仅处理当前用户匹配到的 Claude 进程。锁定期间从其他入口启动，也会在巡检后终止。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            card("安装位置（可选）", icon: "folder") {
+                Text("默认自动发现安装位置；自定义目录、命令别名或特殊版本管理器可填写路径。监测与启动使用相同的发现结果。")
+                    .font(.caption).foregroundStyle(.secondary)
+                TextField("Claude Desktop .app 路径，留空自动发现", text: $draft.desktopApplicationPath)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Claude Code 可执行命令路径，留空自动发现", text: $draft.cliExecutablePath)
+                    .textFieldStyle(.roundedBorder)
+                Text("Desktop 会核对应用标识；CLI 路径仅填写可信的 Claude 安装入口。支持绝对路径和 ~/。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             HStack {

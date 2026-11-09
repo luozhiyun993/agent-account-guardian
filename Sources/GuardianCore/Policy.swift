@@ -7,8 +7,25 @@ public struct GuardianSettings: Codable, Equatable {
     public var pinEnabled = false
     public var protectDesktop = true
     public var protectCLI = true
+    public var desktopApplicationPath = ""
+    public var cliExecutablePath = ""
 
     public init() {}
+
+    enum CodingKeys: String, CodingKey {
+        case country, pinnedIP, pinEnabled, protectDesktop, protectCLI, desktopApplicationPath, cliExecutablePath
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        country = try values.decode(String.self, forKey: .country)
+        pinnedIP = try values.decode(String.self, forKey: .pinnedIP)
+        pinEnabled = try values.decode(Bool.self, forKey: .pinEnabled)
+        protectDesktop = try values.decode(Bool.self, forKey: .protectDesktop)
+        protectCLI = try values.decode(Bool.self, forKey: .protectCLI)
+        desktopApplicationPath = try values.decodeIfPresent(String.self, forKey: .desktopApplicationPath) ?? ""
+        cliExecutablePath = try values.decodeIfPresent(String.self, forKey: .cliExecutablePath) ?? ""
+    }
 
     public var validationError: String? {
         if country.count != 2 || !country.utf8.allSatisfy({ (65...90).contains($0) }) {
@@ -21,6 +38,11 @@ public struct GuardianSettings: Codable, Equatable {
             return "指定出口应为公网地址，不能使用本机、局域网或 Fake-IP 地址。"
         }
         if !protectDesktop && !protectCLI { return "至少选择一个保护对象。" }
+        for path in [desktopApplicationPath, cliExecutablePath] where !path.isEmpty {
+            if !(path.hasPrefix("/") || path.hasPrefix("~/")) || path.contains("\0") || path.contains("\n") {
+                return "安装路径请填写绝对路径或以 ~/ 开头的路径。"
+            }
+        }
         return nil
     }
 }
@@ -68,6 +90,42 @@ public enum LocalHealth: Equatable {
         switch self {
         case .healthy(let interface): return "网络路径已确认 · \(interface)"
         case .unsafe(let reason), .unknown(let reason): return reason
+        }
+    }
+}
+
+public enum ProcessHealth: Equatable {
+    case healthy(count: Int)
+    case partial(count: Int, reason: String)
+    case unknown(String)
+
+    public init(targets: [ProcessIdentity]?) {
+        if let targets {
+            self = .healthy(count: targets.count)
+        } else {
+            self = .unknown("无法读取受保护进程，启动门禁保持关闭。")
+        }
+    }
+
+    public var count: Int? {
+        switch self {
+        case .healthy(let count), .partial(let count, _): return count
+        case .unknown: return nil
+        }
+    }
+
+    public var blockingReason: String? {
+        switch self {
+        case .healthy: return nil
+        case .partial(_, let reason), .unknown(let reason): return reason
+        }
+    }
+
+    public var summary: String {
+        switch self {
+        case .healthy(let count): return "进程检查已完成 · 已识别 \(count) 个受保护进程"
+        case .partial(let count, let reason): return "已识别 \(count) 个受保护进程 · \(reason)"
+        case .unknown(let reason): return reason
         }
     }
 }
@@ -120,7 +178,7 @@ public enum Decision: Equatable {
 
 public enum GuardianPolicy {
     public static func evaluate(settings: GuardianSettings, local: LocalHealth,
-                                exit: ExitHealth, previousIP: String? = nil,
+                                exit: ExitHealth, processes: ProcessHealth? = nil, previousIP: String? = nil,
                                 now: Date = Date()) -> Decision {
         if let error = settings.validationError { return .wait(error) }
         if case .unsafe(let reason) = local { return .trip(reason) }
@@ -138,6 +196,7 @@ public enum GuardianPolicy {
             }
         }
         if case .unknown(let reason) = local { return .wait(reason) }
+        if let reason = processes?.blockingReason { return .wait(reason) }
         guard case .known(let observation) = exit else {
             if case .unknown(let reason) = exit { return .wait(reason) }
             return .wait("等待出口检测。")

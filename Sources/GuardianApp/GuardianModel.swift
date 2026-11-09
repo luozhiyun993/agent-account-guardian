@@ -12,6 +12,7 @@ struct GuardianEvent: Identifiable, Codable {
 final class GuardianModel: ObservableObject {
     @Published var state: ProtectionState
     @Published var local: LocalHealth = .unknown("正在读取系统代理与路由状态…")
+    @Published private(set) var processHealth: ProcessHealth = .unknown("正在读取受保护进程…")
     @Published private(set) var transport: NetworkTransport?
     @Published var exit: ExitHealth = .unknown("正在检测出口…")
     @Published var events: [GuardianEvent] = []
@@ -20,7 +21,6 @@ final class GuardianModel: ObservableObject {
     @Published var stopping = false
     @Published var savingError: String?
     @Published var simulationOutput: [String] = []
-    @Published var targetCount: Int?
     @Published var lastChecked: Date?
     private let store = StateStore()
     private var localTask: Task<Void, Never>?
@@ -31,6 +31,7 @@ final class GuardianModel: ObservableObject {
     private var checkingLocal = false
     private var localRevision = 0
     private var localChecked = Date.distantPast
+    private var processChecked = Date.distantPast
     private var wakeObserver: NSObjectProtocol?
     private var lastConfirmedTransport: NetworkTransport?
 
@@ -71,17 +72,30 @@ final class GuardianModel: ObservableObject {
                 self.revision += 1
                 self.exit = .unknown("系统刚刚唤醒，重新检测出口。")
                 self.local = .unknown("系统刚刚唤醒，重新检测代理。")
+                self.processHealth = .unknown("系统刚刚唤醒，重新检查受保护进程。")
                 self.localChecked = .distantPast
+                self.processChecked = .distantPast
                 self.lastNetworkUpdate = .distantPast
                 self.record("系统唤醒：旧检测结果已失效，等待重新检查。")
             }
         }
     }
 
-    var decision: Decision {
-        let currentLocal: LocalHealth = Date().timeIntervalSince(localChecked) < 8
+    var networkStatus: LocalHealth {
+        if localChecked == .distantPast { return local }
+        return Date().timeIntervalSince(localChecked) < 8
             ? local : .unknown("代理检查结果已过期，等待重新检测。")
-        return GuardianPolicy.evaluate(settings: state.settings, local: currentLocal, exit: exit, previousIP: state.lastIP)
+    }
+
+    var processStatus: ProcessHealth {
+        if processChecked == .distantPast { return processHealth }
+        return Date().timeIntervalSince(processChecked) < 8
+            ? processHealth : .unknown("进程检查结果已过期，启动门禁保持关闭，等待重新检测。")
+    }
+
+    var decision: Decision {
+        GuardianPolicy.evaluate(settings: state.settings, local: networkStatus, exit: exit,
+                                processes: processStatus, previousIP: state.lastIP)
     }
 
     var statusTitle: String {
@@ -89,7 +103,9 @@ final class GuardianModel: ObservableObject {
         if !state.enabled { return "观察模式" }
         switch decision {
         case .allow, .warn: return "保护运行中"
-        case .wait: return "等待网络确认"
+        case .wait(let reason):
+            if processStatus.blockingReason == reason { return "等待进程确认" }
+            return "等待网络确认"
         case .trip: return "检测到异常"
         }
     }
@@ -98,7 +114,7 @@ final class GuardianModel: ObservableObject {
         if let reason = state.lockedReason { return reason }
         if !state.enabled { return "正在检测环境。启用保护后，异常将触发急停。" }
         switch decision {
-        case .allow: return "启动门禁已就绪，正在持续检查代理与出口。"
+        case .allow: return "启动门禁已就绪，正在持续检查代理、出口与进程。"
         case .warn(let reason), .wait(let reason), .trip(let reason): return reason
         }
     }
@@ -141,7 +157,7 @@ final class GuardianModel: ObservableObject {
         defer { checkingLocal = false }
         let settings = state.settings
         let capturedRevision = revision
-        let result = await Task.detached { (LocalInspector.inspectConnection(), ProcessInspector.protectedProcesses(settings: settings)) }.value
+        let result = await Task.detached { (LocalInspector.inspectConnection(), ProcessInspector.inspect(settings: settings)) }.value
         guard revision == capturedRevision else { return }
         let connection = result.0
         if connection.transport != transport {
@@ -159,18 +175,21 @@ final class GuardianModel: ObservableObject {
             }
             lastConfirmedTransport = newTransport
         }
-        var health = connection.health
-        if result.1 == nil, case .healthy = health {
-            health = .unknown("无法读取受保护进程，启动门禁保持关闭。")
-        }
-        if health != local { record("代理检查：\(health.summary)") }
-        local = health
+        if connection.health != local { record("网络检查：\(connection.health.summary)") }
+        local = connection.health
         localChecked = Date()
         localRevision += 1
-        targetCount = result.1?.count
+        updateProcessHealth(result.1)
         applyDecision()
         persist()
         if state.enabled, state.lockedReason != nil { await enforceLock() }
+    }
+
+    private func updateProcessHealth(_ inspection: ProcessInspection) {
+        let health = inspection.health
+        if health != processHealth { record("进程检查：\(health.summary)") }
+        processHealth = health
+        processChecked = Date()
     }
 
     func refreshExit() async {
@@ -238,6 +257,8 @@ final class GuardianModel: ObservableObject {
         state.settings = settings
         revision += 1
         exit = .unknown("设置已更改，正在重新检测。")
+        processHealth = .unknown("保护对象设置已更新，正在重新检查受保护进程。")
+        processChecked = .distantPast
         lastNetworkUpdate = .distantPast
         savingError = nil
         persist()
@@ -271,7 +292,7 @@ final class GuardianModel: ObservableObject {
             guard state.enabled else { notice = "请先启用保护，再进行手动恢复。"; return }
             let result = await freshCheck()
             guard savingError == nil, !stopping, state.recover(result) else {
-                notice = "尚不能解除锁定：请等待检测完成，并确保代理、出口及设置全部通过。"
+                notice = "尚不能解除锁定：请等待检测完成，并确保网络、出口、进程及设置全部通过。"
                 return
             }
             persist()
@@ -285,16 +306,19 @@ final class GuardianModel: ObservableObject {
         stopping = true
         defer { stopping = false }
         let settings = state.settings
-        let targets = await Task.detached { ProcessInspector.protectedProcesses(settings: settings) }.value
-        guard state.enabled, state.lockedReason != nil else { return }
-        guard let targets else {
-            record("急停失败：无法读取目标进程。锁定保持，请手动关闭 Claude。")
-            return
+        let inspection = await Task.detached { ProcessInspector.inspect(settings: settings) }.value
+        guard state.enabled, state.lockedReason != nil, state.settings == settings else { return }
+        updateProcessHealth(inspection)
+        if let reason = inspection.failureReason {
+            record("急停检查提示：\(reason)")
         }
+        let targets = inspection.targets
         guard !targets.isEmpty else { return }
         let report = await Task.detached { await ProcessStopper.stop(targets) }.value
         record("急停结果：已终止 \(report.stopped) 个进程，失败 \(report.failed) 个。\(report.inspectionFailed ? "无法完成进程复核，请手动检查。" : "")")
-        targetCount = await Task.detached { ProcessInspector.protectedProcesses(settings: settings)?.count }.value
+        let remaining = await Task.detached { ProcessInspector.inspect(settings: settings) }.value
+        guard state.settings == settings else { return }
+        updateProcessHealth(remaining)
     }
 
     func realStopTest() {
@@ -311,10 +335,8 @@ final class GuardianModel: ObservableObject {
             guard state.settings.protectDesktop, savingError == nil, state.permitsLaunch(result) else {
                 notice = "启动门禁未通过：请启用保护、完成检查，并解除锁定。"; return
             }
-            let candidates = [URL(fileURLWithPath: "/Applications/Claude.app"),
-                              FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Claude.app")]
-            guard let app = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
-                notice = "未找到 Claude.app。"; return
+            guard let app = InstallationDiscovery.discover(settings: state.settings).desktopApplications.first else {
+                notice = "未发现 Claude Desktop。可在设置中填写应用路径。"; return
             }
             do {
                 _ = try await NSWorkspace.shared.openApplication(at: app, configuration: NSWorkspace.OpenConfiguration())
@@ -329,7 +351,7 @@ final class GuardianModel: ObservableObject {
             guard state.settings.protectCLI, savingError == nil, state.permitsLaunch(result) else {
                 notice = "启动门禁未通过：请启用保护、完成检查，并解除锁定。"; return
             }
-            guard ProcessInspector.claudeCommand() != nil, let executable = Bundle.main.executableURL else {
+            guard ProcessInspector.claudeCommand(settings: state.settings) != nil, let executable = Bundle.main.executableURL else {
                 notice = "未找到 Claude Code，请先安装官方 CLI。"; return
             }
             do {

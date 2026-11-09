@@ -10,6 +10,7 @@ A native macOS desktop app that checks the proxy environment used by Claude with
 
 - Native SwiftUI window and menu bar, with a friendly illustrated padlock icon.
 - Automatic detection of static system HTTPS proxies and actual tunnel routes.
+- Separate network and process-inspection status and event entries. Unavailable process inspection does not overwrite network results, but still blocks managed launching and recovery.
 - Exit-country validation and optional manually pinned exit IP.
 - Protected launching and monitoring for Claude Desktop and Claude Code.
 - Confirmed faults terminate selected processes and lock protection until manual recovery.
@@ -27,7 +28,7 @@ bash scripts/build-app.sh
 open "dist/Account Guardian.app"
 ```
 
-For development, use `swift run AccountGuardian`. The packaged app is ad-hoc signed locally, is not notarized, and targets the architecture of the build machine.
+For development, use `swift run AccountGuardian`. The packaged app is ad-hoc signed locally and is not notarized. The packaging script builds both arm64 and x86_64 and creates a universal Apple Silicon / Intel application.
 
 The app starts in **observation mode**: it checks the environment without terminating Claude. In **Exit & Rules (出口与规则)**, confirm the target country code and optional pinned IP, save your settings, then enable protection from **Overview (保护概览)**.
 
@@ -67,11 +68,13 @@ A lock remains until the user requests recovery and fresh checks pass. Changing 
 
 ## Protected applications and launching
 
-Process identity is verified using the executable path returned by the macOS kernel, rather than a mutable `ps` display name. Native Claude Code remains recognizable when its display name is only `claude`. Unresolved candidate processes report inspection failure instead of zero targets; names alone never authorize termination.
+Process identity prefers the executable path returned by `proc_pidpath`, falling back to the kernel-provided executable path in `KERN_PROCARGS2` when necessary. Mutable `argv[0]` and `ps` display names never authorize termination. Matching is limited to dynamically discovered Claude Desktop applications and Claude Code installations for the current user. Unrelated Node/Bun processes are not candidates based on their names alone; npm launches must match the actual Claude Code script. Exited or zombie candidates do not block inspection.
 
-Claude Desktop and Claude Code can be selected independently. Desktop matching is limited to the current user and known `Claude.app/Contents/` paths. CLI matching uses the resolved executable of an installed Claude command and supports common npm entry points using `node` or `bun` with `@anthropic-ai/claude-code/cli.js`.
+Unresolved Claude candidates are reported separately and block new managed launches/recovery without discarding verified targets. A confirmed network fault still terminates verified Claude targets; unresolved identities are never killed by name alone.
 
-Custom installation paths or additional Node launch flags may not be recognized. Check the detected process count or use the diagnostics command first.
+Claude Desktop and Claude Code can be selected independently. Desktop discovery uses the product bundle ID, system application registration, and outer app metadata from running executables; directory and app name are not fixed. Monitoring and launching share the discovery result. CLI discovery checks the current PATH, common native/Homebrew/npm locations, and nvm/asdf/mise/fnm/Volta layouts, keeping multiple native versions observable. npm scripts are identified through the product package name and `bin.claude` declaration rather than a fixed `cli.js` filename; common Node options and scripts relative to the process working directory are supported.
+
+For shell aliases, unresolved shims or other layouts, enter a trusted `.app` or CLI command path in **Exit & Rules → Installation Location**; absolute paths and `~/` are accepted, while empty fields use automatic discovery. Product IDs, package names, and bounded installer layouts remain matching conventions, not signature authentication. Shell shims are not themselves termination targets. macOS access restrictions and unknown runtime options can still cause misses; use `guardian-diagnostics --list-installations --list-processes` to verify coverage.
 
 Desktop launches use the system application API. Claude Code launches in Terminal and checks the guardian heartbeat, lock, settings, local proxy, and exit again immediately before execution. Terminal determines the initial working directory. For a particular project, change directories in Terminal and run:
 
@@ -87,7 +90,8 @@ Use `swift run guardian-diagnostics --list-processes` to inspect matched PIDs an
 
 ```sh
 swift test --disable-sandbox
-swift run guardian-diagnostics
+bash scripts/verify-discovery.sh
+swift run guardian-diagnostics --list-installations
 swift run guardian-diagnostics --network
 ```
 

@@ -62,6 +62,89 @@ final class GuardianPolicyTests: XCTestCase {
         guard case .trip = result else { return XCTFail("Confirmed exit violation must trip") }
     }
 
+    func testUnknownProcessesBlockLaunchWithoutChangingHealthyNetwork() {
+        let processes = ProcessHealth(targets: nil)
+        XCTAssertNil(processes.count)
+        let result = GuardianPolicy.evaluate(settings: GuardianSettings(), local: healthy,
+            exit: exit(), processes: processes, now: now)
+        XCTAssertEqual(result, .wait(processes.summary))
+        XCTAssertEqual(healthy.summary, "网络路径已确认 · utun1500")
+        XCTAssertEqual(GuardianPolicy.evaluate(settings: GuardianSettings(), local: healthy,
+            exit: exit(), now: now), .allow)
+        var state = ProtectionState()
+        state.enabled = true
+        state.heartbeat = now
+        state.observe(result)
+        XCTAssertNil(state.lockedReason)
+        XCTAssertFalse(state.permitsLaunch(result, now: now))
+        state.lockedReason = "existing lock"
+        XCTAssertFalse(state.recover(result))
+        XCTAssertEqual(state.lockedReason, "existing lock")
+    }
+
+    func testZeroProcessesAreSuccessfulInspectionNotUnknown() {
+        let processes = ProcessHealth(targets: [])
+        XCTAssertEqual(processes, .healthy(count: 0))
+        XCTAssertEqual(processes.count, 0)
+        XCTAssertEqual(processes.summary, "进程检查已完成 · 已识别 0 个受保护进程")
+        XCTAssertEqual(GuardianPolicy.evaluate(settings: GuardianSettings(), local: healthy,
+            exit: exit(), processes: processes, now: now), .allow)
+        let target = ProcessIdentity(pid: 100, uid: 501, started: "today", executable: "/bin/sleep")
+        XCTAssertEqual(ProcessHealth(targets: [target]), .healthy(count: 1))
+    }
+
+    func testUnknownProcessesDoNotHideConfirmedNetworkOrExitFaults() {
+        let processes = ProcessHealth(targets: nil)
+        XCTAssertEqual(GuardianPolicy.evaluate(settings: GuardianSettings(), local: .unsafe("proxy refused"),
+            exit: .unknown("timeout"), processes: processes, now: now), .trip("proxy refused"))
+        guard case .trip = GuardianPolicy.evaluate(settings: GuardianSettings(), local: healthy,
+            exit: exit("8.8.8.8", "US"), processes: processes, now: now) else {
+            return XCTFail("Unknown processes must not hide a confirmed country mismatch")
+        }
+        var settings = GuardianSettings()
+        settings.pinEnabled = true
+        settings.pinnedIP = "1.1.1.1"
+        guard case .trip = GuardianPolicy.evaluate(settings: settings, local: healthy,
+            exit: exit(), processes: processes, now: now) else {
+            return XCTFail("Unknown processes must not hide a confirmed IP mismatch")
+        }
+    }
+
+    func testSeparateProcessStatusPreservesLegacyGateDecisions() {
+        var pinned = GuardianSettings()
+        pinned.pinEnabled = true
+        pinned.pinnedIP = "1.1.1.1"
+        let staleExit = ExitHealth.known(ExitObservation(ip: "8.8.8.8", country: "JP",
+            timestamp: now.addingTimeInterval(-26)))
+        for settings in [GuardianSettings(), pinned] {
+            for local in [healthy, .unknown("route unavailable"), .unsafe("proxy refused")] {
+                for observation in [exit(), exit("8.8.8.8", "US"), .unknown("timeout"), staleExit] {
+                    for processes in [ProcessHealth.healthy(count: 0), ProcessHealth(targets: nil)] {
+                        var legacyLocal = local
+                        if case .healthy = local, case .unknown(let reason) = processes {
+                            legacyLocal = .unknown(reason)
+                        }
+                        let legacy = GuardianPolicy.evaluate(settings: settings, local: legacyLocal,
+                            exit: observation, previousIP: "1.1.1.1", now: now)
+                        let separated = GuardianPolicy.evaluate(settings: settings, local: local,
+                            exit: observation, processes: processes, previousIP: "1.1.1.1", now: now)
+                        XCTAssertEqual(separated, legacy)
+                    }
+                }
+            }
+        }
+    }
+
+    func testPartialProcessesBlockLaunchButKeepVerifiedCountAndNetworkFaultPriority() {
+        let processes = ProcessHealth.partial(count: 2, reason: "Claude candidate unresolved")
+        XCTAssertEqual(processes.count, 2)
+        let result = GuardianPolicy.evaluate(settings: GuardianSettings(), local: healthy,
+            exit: exit(), processes: processes, now: now)
+        XCTAssertEqual(result, .wait("Claude candidate unresolved"))
+        XCTAssertEqual(GuardianPolicy.evaluate(settings: GuardianSettings(), local: .unsafe("proxy refused"),
+            exit: exit(), processes: processes, now: now), .trip("proxy refused"))
+    }
+
     func testStaleOrFutureObservationCannotLaunch() {
         for timestamp in [now.addingTimeInterval(-26), now.addingTimeInterval(10)] {
             let result = GuardianPolicy.evaluate(settings: GuardianSettings(), local: healthy,
@@ -142,6 +225,10 @@ final class GuardianPolicyTests: XCTestCase {
 }
 
 final class InspectionTests: XCTestCase {
+    func testInstallationDiscoveryAcrossCustomLayouts() throws {
+        XCTAssertGreaterThan(try discoveryRegressionChecks(), 25)
+    }
+
     func testRouteParserReadsActualInterface() {
         XCTAssertEqual(LocalInspector.routeInterface(from: "gateway: 10.0.0.1\n  interface: utun7\n"), "utun7")
         XCTAssertNil(LocalInspector.routeInterface(from: "route: not in table"))
@@ -187,7 +274,8 @@ final class InspectionTests: XCTestCase {
         for path in ["/Applications/Claude.app/Contents/MacOS/Claude",
                      "/Applications/Claude.app/Contents/Frameworks/Claude Helper.app/Contents/MacOS/Claude Helper"] {
             let raw = try XCTUnwrap(ProcessIdentity.parse("94272 501 Sat Nov 7 23:22:56 2026 Claude"))
-            XCTAssertTrue(ProcessInspector.isProtected(raw.resolvingExecutable(path), settings: GuardianSettings(), uid: 501))
+            XCTAssertTrue(ProcessInspector.isProtected(raw.resolvingExecutable(path), settings: GuardianSettings(), uid: 501,
+                installations: ClaudeInstallations(desktopApplications: [URL(fileURLWithPath: "/Applications/Claude.app")])) )
         }
     }
 
@@ -196,7 +284,8 @@ final class InspectionTests: XCTestCase {
         func process(_ path: String, uid: UInt32 = 501) -> ProcessIdentity {
             ProcessIdentity(pid: 100, uid: uid, started: "today", executable: path)
         }
-        XCTAssertTrue(ProcessInspector.isProtected(process("/Applications/Claude.app/Contents/MacOS/Claude"), settings: settings, uid: 501))
+        let desktopInstallations = ClaudeInstallations(desktopApplications: [URL(fileURLWithPath: "/Applications/Claude.app")])
+        XCTAssertTrue(ProcessInspector.isProtected(process("/Applications/Claude.app/Contents/MacOS/Claude"), settings: settings, uid: 501, installations: desktopInstallations))
         XCTAssertFalse(ProcessInspector.isProtected(process("/Applications/Claude.app/Contents/MacOS/Claude", uid: 502), settings: settings, uid: 501))
         XCTAssertFalse(ProcessInspector.isProtected(process("/tmp/Claude.app/Contents/MacOS/Claude"), settings: settings, uid: 501))
         XCTAssertFalse(ProcessInspector.isProtected(process("/Applications/Claude.app.fake/Contents/MacOS/Claude"), settings: settings, uid: 501))
@@ -216,6 +305,70 @@ final class InspectionTests: XCTestCase {
         let identity = raw.resolvingExecutable("/opt/homebrew/bin/node")
         XCTAssertTrue(ProcessInspector.isProtected(identity, settings: GuardianSettings(), uid: 501, cliExecutable: path, arguments: ["node", path]))
         XCTAssertFalse(ProcessInspector.isProtected(identity, settings: GuardianSettings(), uid: 501, cliExecutable: path, arguments: ["node", "/tmp/other.js"]))
+    }
+
+    func testKernelFallbackUsesExecutablePathNotMutableArgumentZero() {
+        var argc: Int32 = 2
+        var data = withUnsafeBytes(of: &argc) { Data($0) }
+        data.append(Data("/bin/sleep\0\0claude\0test\0".utf8))
+        XCTAssertEqual(ProcessInspector.executablePath(fromKernelArguments: data), "/bin/sleep")
+        XCTAssertNil(ProcessInspector.executablePath(fromKernelArguments: Data([0, 0, 0])))
+        var relative = withUnsafeBytes(of: &argc) { Data($0) }
+        relative.append(Data("claude\0".utf8))
+        XCTAssertNil(ProcessInspector.executablePath(fromKernelArguments: relative))
+        var truncated = withUnsafeBytes(of: &argc) { Data($0) }
+        truncated.append(Data("/bin/sleep".utf8))
+        XCTAssertNil(ProcessInspector.executablePath(fromKernelArguments: truncated))
+    }
+
+    func testUnrelatedNodeAndSimilarNamesDoNotBlockInspection() {
+        let settings = GuardianSettings()
+        let cli = "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+        for name in ["node", "bun", "claude-helper", "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node",
+                     "/Applications/Codex.app/Contents/Resources/cua_node/bin/node"] {
+            let identity = ProcessIdentity(pid: 100, uid: 501, started: "today", executable: name, executableVerified: false)
+            XCTAssertFalse(ProcessInspector.hasUnresolvedCandidate(identity, settings: settings, uid: 501, cliExecutable: cli))
+            let result = ProcessInspector.evaluate([identity], settings: settings, uid: 501, cliExecutable: cli,
+                arguments: { _ in ["node", "/tmp/other.js"] }, lifecycle: { _ in XCTFail("Unrelated process must not block"); return .running })
+            XCTAssertNil(result.failureReason)
+            XCTAssertEqual(result.health, .healthy(count: 0))
+        }
+    }
+
+    func testExitedCandidatesAreIgnoredButRunningUnknownKeepsVerifiedTargets() {
+        let settings = GuardianSettings()
+        let target = ProcessIdentity(pid: 100, uid: 501, started: "today", executable: "/Applications/Claude.app/Contents/MacOS/Claude")
+        let unknown = ProcessIdentity(pid: 101, uid: 501, started: "today", executable: "claude", executableVerified: false)
+        let installations = ClaudeInstallations(desktopApplications: [URL(fileURLWithPath: "/Applications/Claude.app")])
+        let exited = ProcessInspector.evaluate([target, unknown], settings: settings, uid: 501, installations: installations,
+            arguments: { _ in [] }, lifecycle: { _ in .gone })
+        XCTAssertEqual(exited.targets, [target])
+        XCTAssertNil(exited.failureReason)
+        for lifecycle in [ProcessInspector.ProcessLifecycle.running, .unknown] {
+            let partial = ProcessInspector.evaluate([target, unknown], settings: settings, uid: 501, installations: installations,
+                arguments: { _ in [] }, lifecycle: { _ in lifecycle })
+            XCTAssertEqual(partial.targets, [target])
+            XCTAssertNotNil(partial.failureReason)
+            XCTAssertEqual(partial.health.count, 1)
+            XCTAssertNotNil(partial.health.blockingReason)
+        }
+    }
+
+    func testOnlyClaudeNodeEntrypointIsTargetOrUnresolvedCandidate() {
+        let settings = GuardianSettings()
+        let cli = "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+        let raw = ProcessIdentity(pid: 100, uid: 501, started: "today", executable: "node", executableVerified: false)
+        let args = ["node", cli]
+        XCTAssertTrue(ProcessInspector.hasUnresolvedCandidate(raw, settings: settings, uid: 501, cliExecutable: cli, arguments: args))
+        let unresolved = ProcessInspector.evaluate([raw], settings: settings, uid: 501, cliExecutable: cli,
+            arguments: { _ in args }, lifecycle: { _ in .running })
+        XCTAssertTrue(unresolved.targets.isEmpty)
+        XCTAssertNotNil(unresolved.failureReason)
+        let verified = raw.resolvingExecutable("/opt/homebrew/bin/node")
+        let result = ProcessInspector.evaluate([verified], settings: settings, uid: 501, cliExecutable: cli,
+            arguments: { _ in args }, lifecycle: { _ in .running })
+        XCTAssertEqual(result.targets, [verified])
+        XCTAssertNil(result.failureReason)
     }
 
     func testStopperTerminatesOnlyOwnedDisposableChild() async throws {

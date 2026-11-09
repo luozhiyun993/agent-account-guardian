@@ -63,7 +63,10 @@ struct MenuContents: View {
     @Environment(\.openWindow) private var openWindow
     var body: some View {
         Text(model.statusTitle)
-        Text(model.state.lockedReason ?? model.local.summary)
+        Text(model.statusDetail)
+        Divider()
+        Text("网络：\(model.networkStatus.summary)")
+        Text("进程：\(model.processStatus.summary)")
         Divider()
         Button("打开控制面板") {
             openWindow(id: "main")
@@ -97,7 +100,7 @@ enum CLIEntry {
                 let decision = GuardianPolicy.evaluate(settings: original.settings, local: confirmed.health, exit: exit)
                 let current = try store.load()
                 guard confirmed.transport == transport, current.settings == original.settings, current.permitsLaunch(decision),
-                      let command = ProcessInspector.claudeCommand() else {
+                      let command = ProcessInspector.claudeCommand(settings: current.settings) else {
                     fail("代理或出口检查未通过，或保护状态已变化。Claude Code 未启动。")
                     return
                 }

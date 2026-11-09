@@ -3,15 +3,21 @@ import GuardianCore
 
 let connection = LocalInspector.inspectConnection()
 print("代理与路由：\(connection.health.summary)")
-let settings = GuardianSettings()
-let targets = ProcessInspector.protectedProcesses(settings: settings)
-print("当前用户 Claude 进程：\(targets.map { String($0.count) } ?? "读取失败")")
-if CommandLine.arguments.contains("--list-processes"), let targets {
-    for target in targets {
+let settings = (try? StateStore().load().settings) ?? GuardianSettings()
+let inspection = ProcessInspector.inspect(settings: settings)
+print("进程检查：\(inspection.health.summary)")
+if CommandLine.arguments.contains("--list-processes") {
+    for target in inspection.targets {
         print("已识别 PID \(target.pid)：\(target.executable)")
     }
 }
-print("Claude Code：\(ProcessInspector.claudeCommand() == nil ? "未找到" : "已找到")")
+let installations = InstallationDiscovery.discover(settings: settings)
+print("安装发现：Desktop \(installations.desktopApplications.count) 处 · CLI 命令 \(installations.cliCommands.count) 个 · 原生文件 \(installations.nativeExecutables.count) 个")
+if CommandLine.arguments.contains("--list-installations") {
+    for app in installations.desktopApplications { print("Desktop 安装：\(app.path)") }
+    for command in installations.cliCommands { print("CLI 入口：\(command.path)") }
+}
+print("Claude Code：\(installations.cliCommands.isEmpty ? "未找到" : "已找到")")
 if CommandLine.arguments.contains("--network") {
     let result: ExitHealth
     if let transport = connection.transport {

@@ -56,6 +56,21 @@ public struct ProcessIdentity: Equatable {
     }
 }
 
+public struct ProcessInspection {
+    public let targets: [ProcessIdentity]
+    public let failureReason: String?
+
+    public init(targets: [ProcessIdentity], failureReason: String? = nil) {
+        self.targets = targets
+        self.failureReason = failureReason
+    }
+
+    public var health: ProcessHealth {
+        guard let failureReason else { return .healthy(count: targets.count) }
+        return targets.isEmpty ? .unknown(failureReason) : .partial(count: targets.count, reason: failureReason)
+    }
+}
+
 public enum ProcessInspector {
     public static func snapshot() -> [ProcessIdentity]? {
         let result = Command.run("/bin/ps", ["-axo", "pid=,uid=,lstart=,comm="])
@@ -72,27 +87,71 @@ public enum ProcessInspector {
         let count = buffer.withUnsafeMutableBytes { bytes in
             proc_pidpath(pid, bytes.baseAddress, UInt32(bytes.count))
         }
-        guard count > 0 else { return nil }
+        guard count > 0 else { return kernelExecutablePath(pid: pid) }
         let path = String(cString: buffer)
-        return path.hasPrefix("/") ? path : nil
+        return path.hasPrefix("/") ? path : kernelExecutablePath(pid: pid)
+    }
+
+    private static func kernelArgumentsData(pid: Int32) -> Data? {
+        var request = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&request, u_int(request.count), nil, &size, nil, 0) == 0,
+              size > MemoryLayout<Int32>.size, size < 2_097_152 else { return nil }
+        var buffer = [UInt8](repeating: 0, count: size)
+        guard sysctl(&request, u_int(request.count), &buffer, &size, nil, 0) == 0,
+              size > MemoryLayout<Int32>.size, size <= buffer.count else { return nil }
+        return Data(buffer.prefix(size))
+    }
+
+    static func executablePath(fromKernelArguments data: Data) -> String? {
+        let bytes = [UInt8](data)
+        let start = MemoryLayout<Int32>.size
+        guard bytes.count > start,
+              let end = bytes[start...].firstIndex(of: 0), end > start,
+              let path = String(bytes: bytes[start..<end], encoding: .utf8), path.hasPrefix("/") else { return nil }
+        return path
+    }
+
+    private static func kernelExecutablePath(pid: Int32) -> String? {
+        // KERN_PROCARGS2 starts with the kernel's executable path, before argv/env.
+        // Use only that path as fallback; never use mutable argv[0] to verify identity.
+        guard let data = kernelArgumentsData(pid: pid) else { return nil }
+        return executablePath(fromKernelArguments: data)
+    }
+
+    private static func desktopPath(_ path: String) -> Bool {
+        InstallationDiscovery.desktopApplication(containingExecutable: path) != nil
     }
 
     static func hasUnresolvedCandidate(_ identity: ProcessIdentity, settings: GuardianSettings,
-                                       uid: UInt32 = getuid(), cliExecutable: String? = nil) -> Bool {
+                                       uid: UInt32 = getuid(), cliExecutable: String? = nil,
+                                       arguments: [String] = [], installations: ClaudeInstallations? = nil,
+                                       workingDirectory: String? = nil) -> Bool {
         guard identity.uid == uid, identity.pid != getpid(), !identity.executableVerified else { return false }
         let name = URL(fileURLWithPath: identity.executable).lastPathComponent.lowercased()
-        if settings.protectCLI, ["claude", "node", "bun"].contains(name) || identity.executable == cliExecutable { return true }
-        if settings.protectDesktop, identity.executable.contains("Claude.app/Contents/") || name.hasPrefix("claude") { return true }
-        return false
+        let desktop = installations?.containsDesktopExecutable(identity.executable) ?? desktopPath(identity.executable)
+        if settings.protectDesktop, desktop || name == "claude" { return true }
+        guard settings.protectCLI else { return false }
+        if name == "claude" || identity.executable == cliExecutable { return true }
+        if let installations, installations.nativeExecutables.contains(InstallationDiscovery.canonical(identity.executable)) { return true }
+        return ["node", "bun"].contains(name) && isCLIEntrypoint(arguments, cliExecutable: cliExecutable,
+            installations: installations, workingDirectory: workingDirectory)
+    }
+
+    static func isCLIEntrypoint(_ arguments: [String], cliExecutable: String?,
+                               installations: ClaudeInstallations? = nil, workingDirectory: String? = nil) -> Bool {
+        guard let entry = InstallationDiscovery.scriptArgument(arguments, workingDirectory: workingDirectory) else { return false }
+        if let installations, installations.scriptEntrypoints.contains(entry) { return true }
+        if let cliExecutable, entry == InstallationDiscovery.canonical(cliExecutable) { return true }
+        // The manifest declares the package identity and CLI bin entry, independent of installation location/name.
+        return InstallationDiscovery.packageEntrypoint(containing: entry) == entry
     }
 
     public static func arguments(pid: Int32) -> [String] {
-        var request = [CTL_KERN, KERN_PROCARGS2, pid]
-        var size = 0
-        guard sysctl(&request, u_int(request.count), nil, &size, nil, 0) == 0, size > 4, size < 2_097_152 else { return [] }
-        var buffer = [UInt8](repeating: 0, count: size)
-        guard sysctl(&request, u_int(request.count), &buffer, &size, nil, 0) == 0 else { return [] }
-        let count = buffer.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
+        guard let data = kernelArgumentsData(pid: pid) else { return [] }
+        let buffer = [UInt8](data)
+        let size = buffer.count
+        let count = data.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
         guard count > 0, count < 8192 else { return [] }
         var position = MemoryLayout<Int32>.size
         while position < size && buffer[position] != 0 { position += 1 }
@@ -108,42 +167,86 @@ public enum ProcessInspector {
         return arguments
     }
 
-    public static func claudeCommand() -> URL? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return ["\(home)/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude",
-                "\(home)/.claude/local/claude"]
-            .map { URL(fileURLWithPath: $0) }
-            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    public static func claudeCommand(settings: GuardianSettings = GuardianSettings()) -> URL? {
+        InstallationDiscovery.discover(settings: settings).cliCommands.first
+    }
+
+    public static func workingDirectory(pid: Int32) -> String? {
+        var info = proc_vnodepathinfo()
+        let size = MemoryLayout<proc_vnodepathinfo>.size
+        guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, Int32(size)) == size else { return nil }
+        let path = withUnsafeBytes(of: info.pvi_cdir.vip_path) { bytes in
+            String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
+        }
+        return path.hasPrefix("/") ? path : nil
     }
 
     public static func isProtected(_ identity: ProcessIdentity, settings: GuardianSettings,
                                    uid: UInt32 = getuid(), cliExecutable: String? = nil,
-                                   arguments: [String] = []) -> Bool {
+                                   arguments: [String] = [], installations: ClaudeInstallations? = nil,
+                                   workingDirectory: String? = nil) -> Bool {
         guard identity.uid == uid, identity.pid != getpid(), identity.executableVerified else { return false }
-        if settings.protectDesktop {
-            let home = FileManager.default.homeDirectoryForCurrentUser.path
-            for root in ["/Applications/Claude.app/Contents/", "\(home)/Applications/Claude.app/Contents/"] {
-                if identity.executable.hasPrefix(root) { return true }
+        let desktop = installations?.containsDesktopExecutable(identity.executable) ?? desktopPath(identity.executable)
+        if settings.protectDesktop, desktop { return true }
+        guard settings.protectCLI else { return false }
+        if identity.executable == cliExecutable { return true }
+        if let installations, installations.nativeExecutables.contains(InstallationDiscovery.canonical(identity.executable)) { return true }
+        let name = URL(fileURLWithPath: identity.executable).lastPathComponent.lowercased()
+        return ["node", "bun"].contains(name) && isCLIEntrypoint(arguments, cliExecutable: cliExecutable,
+            installations: installations, workingDirectory: workingDirectory)
+    }
+
+    enum ProcessLifecycle {
+        case running, gone, unknown
+    }
+
+    static func lifecycle(pid: Int32) -> ProcessLifecycle {
+        var info = proc_bsdinfo()
+        let size = MemoryLayout<proc_bsdinfo>.size
+        errno = 0
+        let count = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(size))
+        if count == size { return info.pbi_status == UInt32(SZOMB) ? .gone : .running }
+        return errno == ESRCH ? .gone : .unknown
+    }
+
+    static func evaluate(_ processes: [ProcessIdentity], settings: GuardianSettings,
+                         uid: UInt32 = getuid(), cliExecutable: String? = nil,
+                         installations: ClaudeInstallations? = nil,
+                         arguments: (Int32) -> [String], lifecycle: (Int32) -> ProcessLifecycle,
+                         workingDirectory: (Int32) -> String? = { _ in nil }) -> ProcessInspection {
+        var targets: [ProcessIdentity] = []
+        var unresolved = 0
+        for identity in processes where identity.uid == uid && identity.pid != getpid() {
+            let name = URL(fileURLWithPath: identity.executable).lastPathComponent.lowercased()
+            let entryArguments = settings.protectCLI && ["node", "bun"].contains(name) ? arguments(identity.pid) : []
+            let directory = entryArguments.count > 1 ? workingDirectory(identity.pid) : nil
+            if isProtected(identity, settings: settings, uid: uid, cliExecutable: cliExecutable,
+                           arguments: entryArguments, installations: installations, workingDirectory: directory) {
+                targets.append(identity)
+            } else if hasUnresolvedCandidate(identity, settings: settings, uid: uid,
+                                             cliExecutable: cliExecutable, arguments: entryArguments,
+                                             installations: installations, workingDirectory: directory) {
+                // A process that has exited cannot send traffic and must not keep the gate closed.
+                if case .gone = lifecycle(identity.pid) { continue }
+                unresolved += 1
             }
         }
-        guard settings.protectCLI, let cliExecutable else { return false }
-        if identity.executable == cliExecutable { return true }
-        let name = URL(fileURLWithPath: identity.executable).lastPathComponent
-        guard ["node", "bun"].contains(name), arguments.count > 1,
-              cliExecutable.hasSuffix("/@anthropic-ai/claude-code/cli.js") else { return false }
-        return URL(fileURLWithPath: arguments[1]).resolvingSymlinksInPath().path == cliExecutable
+        let reason = unresolved == 0 ? nil : "有 \(unresolved) 个 Claude 候选进程暂时无法核实，启动门禁保持关闭；已核实目标仍可执行急停。"
+        return ProcessInspection(targets: targets, failureReason: reason)
+    }
+
+    public static func inspect(settings: GuardianSettings) -> ProcessInspection {
+        guard let processes = snapshot() else {
+            return ProcessInspection(targets: [], failureReason: "无法读取系统进程列表，启动门禁保持关闭。")
+        }
+        let installations = InstallationDiscovery.discover(settings: settings, processes: processes)
+        return evaluate(processes, settings: settings, installations: installations,
+                        arguments: arguments, lifecycle: lifecycle, workingDirectory: workingDirectory)
     }
 
     public static func protectedProcesses(settings: GuardianSettings) -> [ProcessIdentity]? {
-        guard let processes = snapshot() else { return nil }
-        let cli = claudeCommand()?.resolvingSymlinksInPath().path
-        if processes.contains(where: { hasUnresolvedCandidate($0, settings: settings, cliExecutable: cli) }) { return nil }
-        return processes.filter { identity in
-            guard identity.uid == getuid() else { return false }
-            let name = URL(fileURLWithPath: identity.executable).lastPathComponent
-            let arguments = ["node", "bun"].contains(name) ? arguments(pid: identity.pid) : []
-            return isProtected(identity, settings: settings, cliExecutable: cli, arguments: arguments)
-        }
+        let result = inspect(settings: settings)
+        return result.failureReason == nil ? result.targets : nil
     }
 }
 
